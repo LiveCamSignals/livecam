@@ -648,7 +648,7 @@
       <button id="refresh-btn" onclick="fetchRooms()">↻ Refresh</button>
     </div>
 
-    <div id="error-bar">⚠ Could not load rooms — showing cached data. <span id="error-msg"></span></div>
+    <div id="error-bar">⚠ Could not load rooms. <span id="error-msg"></span> — <button onclick="fetchRooms()" style="background:none;border:none;color:#f44336;text-decoration:underline;cursor:pointer;font-size:12px;padding:0;">Retry</button></div>
 
     <div id="loading">
       <div class="spinner"></div>
@@ -721,7 +721,14 @@
   })();
 
   const API_URL = 'https://chaturbate.com/api/public/affiliates/onlinerooms/?wm=T2CSW&client_ip=request_ip&limit=500&offset=0';
-  const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+
+  // Multiple CORS proxies tried in order — first success wins
+  const PROXIES = [
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    url => `https://proxy.cors.sh/${url}`,
+    url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  ];
 
   let allRooms = [];
   let sortCol = 'viewers';
@@ -736,14 +743,46 @@
 
   function $(id) { return document.getElementById(id); }
 
+  async function fetchWithTimeout(url, ms = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  }
+
+  async function fetchViaProxy() {
+    let lastErr;
+    for (const proxy of PROXIES) {
+      try {
+        const proxyUrl = proxy(API_URL);
+        const res = await fetchWithTimeout(proxyUrl, 10000);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const text = await res.text();
+        // Handle both raw JSON and allorigins-wrapped response
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error('Invalid JSON'); }
+        // allorigins wraps content in { contents: "..." }
+        if (typeof data.contents === 'string') data = JSON.parse(data.contents);
+        const results = data.results || data;
+        if (!Array.isArray(results) || !results.length) throw new Error('Empty results');
+        return results;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('All proxies failed');
+  }
+
   async function fetchRooms() {
     setStatus('loading');
     try {
-      const res = await fetch(CORS_PROXY + encodeURIComponent(API_URL));
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const results = data.results || [];
-      if (!results.length) throw new Error('Empty response');
+      const results = await fetchViaProxy();
       processRooms(results);
       $('error-bar').style.display = 'none';
       setStatus('live');
